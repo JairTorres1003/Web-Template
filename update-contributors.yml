@@ -1,0 +1,81 @@
+name: Update Contributors
+
+on:
+  workflow_dispatch: # Manually trigger the workflow
+  schedule:
+    - cron: '30 13 1,15 * *' # Run on the 1st and 15th day of each month at 13:30 UTC
+
+jobs:
+  update-contributors:
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Get Contributors
+        id: contributors
+        run: |
+          GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
+          REPO_NAME="${{ github.repository }}"
+
+          contributors=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+            https://api.github.com/repos/$REPO_NAME/contributors | jq -c '.')
+
+          # Check if the request was successful
+          if [[ $? -ne 0 || -z "$contributors" ]]; then
+            echo "Error: Unable to get contributors from GitHub API"
+            exit 1
+          fi
+
+          # Set the output variable for use by other jobs
+          echo "CONTRIBUTORS=$contributors" >> "$GITHUB_OUTPUT"
+
+      - name: Update README.md
+        id: update-readme
+        env:
+          RESPONSE: ${{ steps.contributors.outputs.CONTRIBUTORS }}
+        run: |
+          echo "" > README.md.tmp
+
+          for contributor in $(echo $RESPONSE | jq -r '.[] | @base64'); do
+            # Helper function to decode base64 and parse JSON
+            _jq() {
+              echo ${contributor} | base64 --decode | jq -r ${1}
+            }
+
+            # Get the username and avatar url
+            username=$(_jq '.login')
+            avatar_url=$(_jq '.avatar_url')
+
+            # Add the contributor to the README
+            echo "<a href='https://github.com/$username' target='_blank'><img src='https://images.weserv.nl/?url=$avatar_url&h=100&w=100&mask=circle' alt='$username' title='$username' width='40' height='40' /></a>" >> README.md.tmp
+          done
+
+          echo "" >> README.md.tmp
+
+          # Update the content between the specified markers
+          awk '/<!-- ALL-CONTRIBUTORS-LIST:START -->/{p=1;print;system("cat README.md.tmp")} /<!-- ALL-CONTRIBUTORS-LIST:END -->/{p=0} !p' README.md > README.updated && mv README.updated README.md
+
+      - name: Clean up
+        run: |
+          rm README.md.tmp
+
+      - name: Commit and Push Changes
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global user.email "actions@github.com"
+          git config --global user.name "GitHub Actions"
+
+          # Check if there are any changes
+          if git diff --quiet README.md; then
+            echo "No changes to commit"
+            exit 0
+          fi
+
+          git add README.md
+          git commit -m "Update Contributors"
+          git push https://$GITHUB_TOKEN@github.com/${{ github.repository }}.git HEAD:main
